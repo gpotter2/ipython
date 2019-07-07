@@ -888,6 +888,7 @@ class IPCompleter(Completer):
         """All active matcher routines for completion."""
         return [
             self.file_matches,
+            self.unicode_matches,
             self.magic_matches,
             self.magic_config_matches,
             self.magic_color_matches,
@@ -899,7 +900,7 @@ class IPCompleter(Completer):
         """
         prefix = text.rpartition('.')[0]
         with provisionalcompleter():
-            return ['.'.join([prefix, c.text]) if prefix and self.use_jedi else c.text
+            return ['.'.join([prefix, c.text]) if prefix else c.text
                     for c in self.completions(text, len(text))]
 
         return self.complete(text)[1]
@@ -1006,6 +1007,27 @@ class IPCompleter(Completer):
         matches = [x+'/' if os.path.isdir(x) else x for x in matches]
         return matches, priority, False
 
+    def unicode_matches(self, text:str):
+        def _iter(text=text):
+            if self.backslash_combining_completions:
+                # allow deactivation of these on windows.
+                latex_text, latex_matches = self.latex_matches(text)
+                if latex_matches:
+                    for m in latex_matches:
+                        yield latex_text, m, 'latex_matches'
+                    return
+                name_text = ''
+                name_matches = []
+                # need to add self.fwd_unicode_match() function here when done
+                for meth in (self.unicode_name_matches, back_latex_name_matches, back_unicode_name_matches, self.fwd_unicode_match):
+                    name_text, name_matches = meth(text)
+                    if name_text:
+                        for m in name_matches[:MATCHES_LIMIT]:
+                            yield name_text, m, meth.__qualname__
+        res = list(_iter())
+        return res, 2, bool(res)
+
+
     def magic_matches(self, text):
         """Match magics.
 
@@ -1102,7 +1124,7 @@ class IPCompleter(Completer):
                      if color.startswith(prefix) ], 2, True
         return [], 0, False
 
-    def _jedi_matches(self, offset:int, text:int):
+    def _jedi_matches(self, text:str):
         """
 
         Return a list of :any:`jedi.api.Completions` object from a ``text`` and
@@ -1110,9 +1132,6 @@ class IPCompleter(Completer):
 
         Parameters
         ----------
-        offset:int
-            Integer representing the position of the cursor in ``text``. Offset
-            is 0-based indexed.
         text:str
             text to complete
 
@@ -1128,20 +1147,19 @@ class IPCompleter(Completer):
 
         completion_filter = lambda x:x
         # filter output if we are completing for object members
-        if offset:
-            pre = text[offset-1]
-            if pre == '.':
-                if self.omit__names == 2:
-                    completion_filter = lambda c:not c.name.startswith('_')
-                elif self.omit__names == 1:
-                    completion_filter = lambda c:not (c.name.startswith('__') and c.name.endswith('__'))
-                elif self.omit__names == 0:
-                    completion_filter = lambda x:x
-                else:
-                    raise ValueError("Don't understand self.omit__names == {}".format(self.omit__names))
+        pre = text[-1]
+        if False and pre == '.':
+            if self.omit__names == 2:
+                completion_filter = lambda c:not c.name.startswith('_')
+            elif self.omit__names == 1:
+                completion_filter = lambda c:not (c.name.startswith('__') and c.name.endswith('__'))
+            elif self.omit__names == 0:
+                completion_filter = lambda x:x
+            else:
+                raise ValueError("Don't understand self.omit__names == {}".format(self.omit__names))
 
         interpreter = jedi.Interpreter(
-            text[:offset], namespaces
+            text, namespaces
         )
 
         try:
@@ -1165,10 +1183,10 @@ class IPCompleter(Completer):
         try:
             return filter(completion_filter, interpreter.completions())
         except Exception as e:
-            if self.debug:
-                return [_FakeJediCompletion('Oops Jedi has crashed, please report a bug with the following:\n"""\n%s\ns"""' % (e))]
-            else:
-                return []
+            # I think that even end-users should be aware
+            # of jedi failures (previously only in debug).
+            # For instance, to detect Access Denied errors
+            return [_FakeJediCompletion('Oops Jedi has crashed, please report a bug with the following:\n"""\n%s\ns"""' % (e))]
 
 
     def unicode_name_matches(self, text):
@@ -1193,6 +1211,24 @@ class IPCompleter(Completer):
             except KeyError:
                 pass
         return u'', []
+
+    def fwd_unicode_match(self, text:str) -> Tuple[str, list]:
+        if self._names is None:
+            self._names = []
+            for c in range(0,0x10FFFF + 1):
+                try:
+                    self._names.append(unicodedata.name(chr(c)))
+                except ValueError:
+                    pass
+
+        slashpos = text.rfind('\\')
+        # if text starts with slash
+        if slashpos > -1:
+            s = text[slashpos+1:]
+            candidates = [x for x in self._names if x.startswith(s)]
+            if candidates:
+                return s, candidates
+        return '', ()
 
 
     def latex_matches(self, text):
@@ -1354,7 +1390,7 @@ class IPCompleter(Completer):
         self.text_until_cursor = full_text[:offset]
         cursor_line, cursor_pos = position_to_cursor(full_text, offset)
         line_buffer = full_text.split('\n')[cursor_line]
-        text = self.splitter.split_line(full_text, cursor_pos)
+        text = self.splitter.split_line(line_buffer, cursor_pos)
 
         if self.use_main_ns:
             self.namespace = __main__.__dict__
@@ -1363,7 +1399,7 @@ class IPCompleter(Completer):
 
         # Dispatch jedi completion
         jedi_matches = self._jedi_matches(
-            offset, full_text
+            text
         )
         def iter_jedi(jedi_matches=jedi_matches):
             for jm in iter(jedi_matches):
@@ -1389,12 +1425,17 @@ class IPCompleter(Completer):
                     matches, priority, alone = results, 2, False
                 def iter_matches(matches=matches):
                     for m in matches:
-                        delta = len(text)
+                        if isinstance(m, tuple):
+                            t, m, o = m
+                        else:
+                            o = matcher.__qualname__
+                            t = text
+                        delta = len(t)
                         yield Completion(start=offset - delta,
                                          end=offset,
                                          text=m,
                                          type='',
-                                         _origin=matcher.__qualname__,
+                                         _origin=o,
                                          signature='')
                 iterators[priority].append((iter_matches, alone))
             except:
