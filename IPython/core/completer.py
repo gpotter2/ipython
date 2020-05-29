@@ -585,9 +585,13 @@ class Completer(Configurable):
         """
     ).tag(config=True)
 
-    use_jedi = Bool(default_value=JEDI_INSTALLED,
-                    help="Experimental: Use Jedi to generate autocompletions. "
-                    "Default to True if jedi is installed.").tag(config=True)
+    # Since IPython 6.0.0, jedi used to be enabled by default on IPython.
+    # But in all fairness, IPython's jedi integration is currently simply
+    # broken. **This file needs a serious refactor**. So let's disable it
+    # for now because the end user will benefit from this. XXX TODO FIXME
+    use_jedi = Bool(default_value=False,  # JEDI_INSTALLED,
+                    help="Experimental: Use Jedi to generate autocompletions. ").tag(config=True)
+                    # "Default to True if jedi is installed."
 
     jedi_compute_type_timeout = Int(default_value=400,
         help="""Experimental: restrict time (in milliseconds) during which Jedi can compute types.
